@@ -10,7 +10,7 @@
 
 ## Abstract
 
-Training large language models from scratch for domain-specific code generation requires tens of gigabytes of GPU memory and weeks of compute — resources unavailable to most practitioners. This work presents a complete framework for fine-tuning code-focused LLMs on consumer-grade hardware through **LoRA** (Low-Rank Adaptation) and **QLoRA** (Quantized LoRA). By updating only 0.14% of model parameters and loading base weights in 4-bit NormalFloat precision, we reduce peak VRAM from 28 GB to under 5 GB for a 3B-parameter model, enabling full training on a free-tier Colab T4. We target Java/Spring Boot code generation, provide a modular end-to-end pipeline (data ingestion → fine-tuning → evaluation → Gradio demo), and publish trained LoRA adapters on Hugging Face. Experiments on StarCoder2-3B with 5 000 instruction samples demonstrate the mechanics and practical limits of resource-constrained fine-tuning, and we provide scaling recommendations for production-quality results.
+This work presents a QLoRA fine-tuning pipeline for code-focused LLMs, run as a **proof of concept**. LoRA (Low-Rank Adaptation) trains a small set of adapter weights (about 0.14% of the parameters with r=16; the exact count is to be re-run and verified), and QLoRA loads the base weights in 4-bit NormalFloat precision. The pipeline (data ingestion → fine-tuning → evaluation → demo interface) was run on StarCoder2-3B with 5 000 instruction samples and 3 epochs on a T4 16 GB (Google Colab), and the adapter is published on Hugging Face. **The resulting model is not usable**: it produces incoherent text. The experiment shows the mechanics and the practical limits of resource-constrained fine-tuning; the scaling recommendations are untested estimates.
 
 ---
 
@@ -35,7 +35,7 @@ The ability to adapt a pre-trained LLM to a specific code domain — such as Spr
 
 Parameter-efficient fine-tuning (PEFT) methods close this gap. This project demonstrates that:
 
-- A production-grade **training pipeline** can be built entirely on open-source tooling (Transformers, PEFT, TRL, bitsandbytes).
+- A complete **training pipeline** can be built entirely on open-source tooling (Transformers, PEFT, TRL, bitsandbytes).
 - **LoRA adapters** trained on consumer hardware are reusable, swappable, and add zero inference latency when merged into the base model.
 - The engineering tradeoffs — memory vs. accuracy, training time vs. data volume — can be characterized and communicated clearly.
 
@@ -93,7 +93,7 @@ Tokenization & Filtering  ──►  max_length = 2048, deduplicated
 Base Model Loading (QLoRA)  ──►  BitsAndBytesConfig (NF4, double quant, FP16 compute)
     │
     ▼
-LoRA Adapter Injection  ──►  target modules: q/k/v/o proj, gate/up/down proj
+LoRA Adapter Injection  ──►  target modules: attention projections (see §3.2)
     │
     ▼
 SFT Training (TRL SFTTrainer)
@@ -102,7 +102,7 @@ SFT Training (TRL SFTTrainer)
 Adapter Serialization  ──►  Hugging Face Hub push
     │
     ▼
-Evaluation  ──►  BLEU, keyword accuracy, syntax validity, Pass@k
+Evaluation  ──►  BLEU, keyword accuracy, syntax validity, Pass@k (implemented, not run)
 ```
 
 ### 3.2 LoRA Configuration
@@ -113,7 +113,7 @@ Evaluation  ──►  BLEU, keyword accuracy, syntax validity, Pass@k
 | Alpha α | 32 | 2× rank — standard effective LR scaling |
 | Dropout | 0.05 | Light regularization |
 | Bias | none | Standard practice |
-| Target modules | q/k/v/o\_proj, gate/up/down\_proj | Full attention + MLP coverage |
+| Target modules | 4 attention modules on the published adapter | `config.yaml` lists 7 modules (attention + MLP) while the adapter on Hugging Face has 4; the parameter count is to be re-run and verified |
 
 ### 3.3 Quantization Configuration
 
@@ -160,6 +160,8 @@ During generation, the model receives everything up to `### Response:` and autor
 
 ### 3.6 Evaluation Metrics
 
+The metrics below are implemented in `benchmark.py`, but **no benchmark has been run**: no scores are reported in this work.
+
 **BLEU** — n-gram overlap (1–4 grams) with brevity penalty against reference implementations.
 
 **Keyword Accuracy** — percentage of domain-specific identifiers present in generated output (e.g., `@RestController`, `@Transactional`, `ResponseEntity`, `@GetMapping`). Measures domain knowledge acquisition independently of exact wording.
@@ -180,7 +182,7 @@ During generation, the model receives everything up to `### Response:` and autor
 | Total samples | 18 000 instruction–code pairs |
 | Used in experiments | 5 000 (compute-constrained) |
 | Train / validation split | 90 / 10 |
-| Domain shift target | Java / Spring Boot |
+| Domain shift target | Java / Spring Boot (intended; the dataset itself is Python, not Java) |
 
 ### 4.2 Base Model
 
@@ -199,6 +201,8 @@ Other models supported by the pipeline:
 
 ### 4.3 Compute
 
+Training time, throughput and parameter counts below are values reported in the paper, not verifiable from the repository (the notebook has no saved outputs).
+
 | Resource | Specification |
 |----------|---------------|
 | GPU | NVIDIA T4 (16 GB VRAM) — Google Colab free tier |
@@ -213,6 +217,8 @@ Other models supported by the pipeline:
 
 ### 5.1 Training Dynamics
 
+The values below are reported in the paper and are not verifiable from the repository (no logs or notebook outputs are saved); the parameter counts are to be re-run and verified.
+
 | Metric | Value |
 |--------|-------|
 | Initial training loss | ~2.8 |
@@ -220,18 +226,13 @@ Other models supported by the pipeline:
 | Trainable parameters | 4 194 304 (0.14%) |
 | Frozen parameters | 2 995 748 864 (99.86%) |
 
-The loss curve shows healthy descent, confirming that gradient flow through quantized weights via LoRA adapters functions correctly even at 4-bit precision.
-
 ### 5.2 Generation Quality
 
-The 5 000-sample, 3-epoch experiment intentionally operates **below the quality threshold** for deployable results. Generated outputs exhibit:
-- Partially coherent Java-like syntax
-- Correct high-level structure (class declaration, method signatures)
-- Unreliable annotation placement and logic correctness
-
-This is expected and pedagogically valuable: it demonstrates that parameter-efficient methods eliminate the **memory barrier** but not the **data and compute requirements** for convergence.
+The 5 000-sample, 3-epoch experiment operates **below the quality threshold** for usable results: the trained adapter produces incoherent text (`docs/paper.md` §4.2). The experiment shows that parameter-efficient methods eliminate the **memory barrier** but not the **data and compute requirements** for convergence — a conclusion that is not backed by a controlled comparison.
 
 ### 5.3 Memory Footprint Comparison
+
+The figures below are theoretical estimates for a 7B model, not measurements.
 
 | Configuration | VRAM (7B model) |
 |---------------|-----------------|
@@ -240,11 +241,13 @@ This is expected and pedagogically valuable: it demonstrates that parameter-effi
 | LoRA FP16 (frozen base) | ~14 GB |
 | **QLoRA NF4 + LoRA** | **~4–5 GB** |
 
-For StarCoder2-3B specifically, QLoRA brings peak VRAM to ~3.2 GB during inference and ~4.8 GB during training — fitting comfortably on a T4.
+For StarCoder2-3B the paper estimates about 4.8 GB during training, without a saved measurement. Training was run on a T4 16 GB with 4-bit quantization.
 
 ---
 
 ## 6. Scaling Recommendations
+
+The table below contains untested estimates, not results.
 
 | Configuration | Samples | Epochs | GPU | Est. Time | Expected Quality |
 |---------------|---------|--------|-----|-----------|------------------|
@@ -278,11 +281,11 @@ Adapter size: ~4–5 MB (vs. 6 GB for the full base model).
 
 ### Colab Notebook
 
-A ready-to-run Google Colab notebook (`notebooks/colab_training.ipynb`) installs dependencies, downloads the dataset, runs QLoRA fine-tuning on T4, and evaluates the result — end to end in under 45 minutes on free-tier hardware.
+A ready-to-run Google Colab notebook (`notebooks/colab_training.ipynb`) installs dependencies, downloads the dataset, and runs QLoRA fine-tuning on T4. The notebook has no saved outputs, so timings and results are not documented in the repository.
 
 ### Interactive Demo
 
-A Gradio interface demonstrates the fine-tuned model with six pre-configured prompts covering:
+A Gradio interface (`demo/app.py`) shows pre-generated example answers selected by matching the question; it does **not run the model**. The six pre-configured prompts cover:
 - REST controller generation
 - JPA repository scaffolding
 - Spring Security JWT configuration
@@ -315,11 +318,11 @@ A Gradio interface demonstrates the fine-tuned model with six pre-configured pro
 
 ## 8. Limitations
 
-**Experimental scope.** Results reported here use 5 000 training samples and 3 epochs — sufficient to validate the pipeline but insufficient for production deployment. Keyword accuracy and syntax validity scores are preliminary.
+**Experimental scope.** The experiment uses 5 000 training samples and 3 epochs — enough to run the pipeline, not enough for a usable model. No evaluation metric has been computed.
 
 **Domain shift.** The training dataset (`python_code_instructions_18k_alpaca`) targets Python, while evaluation benchmarks target Java/Spring Boot. A dataset curated specifically for the target domain would yield significantly better results.
 
-**Evaluation metrics.** BLEU is a known imperfect proxy for code quality — a functionally correct solution with different variable names scores poorly. Pass@k on a formal benchmark (HumanEval, MBPP) would be more meaningful and is left for future work.
+**Evaluation metrics.** BLEU is a known imperfect proxy for code quality — a functionally correct solution with different variable names scores poorly. The metrics are implemented but not run; Pass@k on a formal benchmark (HumanEval, MBPP) is left for future work.
 
 **Quantization accuracy loss.** 4-bit NF4 introduces a small but non-zero precision penalty versus FP16. For tasks requiring exact arithmetic or rare token sequences, this may degrade output quality.
 
@@ -344,7 +347,7 @@ A Gradio interface demonstrates the fine-tuned model with six pre-configured pro
 If you find this work useful, please cite:
 
 ```bibtex
-@misc{fasciani2026codelora,
+@misc{fasciglione2026codelora,
   author       = {Fasciglione, Fabio},
   title        = {Parameter-Efficient Fine-Tuning of Code LLMs via LoRA and QLoRA},
   year         = {2026}
